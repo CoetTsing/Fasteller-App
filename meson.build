@@ -9,11 +9,13 @@ dpdk_dep = declare_dependency(
         '-lrte_mempool_ring'
     ],
 )
+
+hiredis_dep = dependency('hiredis')
  
 sources = files(
     'basicfwd.c'
 )
  
 executable('basicfwd',sources,
-    dependencies: dpdk_dep
+    dependencies: [dpdk_dep, hiredis_dep]
 )

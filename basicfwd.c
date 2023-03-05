@@ -9,6 +9,7 @@
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+#include <hiredis/hiredis.h>
 
 #define RX_RING_SIZE 1024
 #define TX_RING_SIZE 1024
@@ -131,8 +132,8 @@ lcore_main(void)
 
 	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
 			rte_lcore_id());
-	// redisContext *c = redisConnect("127.0.0.1", 6379);
-	// redisReply *reply;
+	redisContext *c = redisConnect("127.0.0.1", 6379);
+	redisReply *reply;
 	/* Run until the application is quit or killed. */
 	for (;;) {
 		/*
@@ -157,12 +158,12 @@ lcore_main(void)
 			for (int j = 0x1a; j < 0x26; j++) {
 				key[j - 0x19] = pktbuf[j];
 			}
-			// reply = redisCommand(c, "SET %b 1", key, 13);
-			// printf("SET (binary API): %s\n", reply->str);
- 			// freeReplyObject(reply);
-			for (int j = 0 ; j < 13; j++) {
-				putchar(key[j]);
-			}
+			reply = redisCommand(c, "SET %b 1", key, 13);
+			printf("SET (binary API): %s\n", reply->str);
+ 			freeReplyObject(reply);
+			// for (int j = 0 ; j < 13; j++) {
+			// 	putchar(key[j]);
+			// }
         }
 		/* Send burst of TX packets, to second port of pair. */
 		// const uint16_t nb_tx = rte_eth_tx_burst(port ^ 1, 0,
