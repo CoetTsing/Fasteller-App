@@ -4,11 +4,13 @@
 
 #include <stdint.h>
 #include <inttypes.h>
+
 #include <rte_eal.h>
 #include <rte_ethdev.h>
 #include <rte_cycles.h>
 #include <rte_lcore.h>
 #include <rte_mbuf.h>
+
 #include <hiredis/hiredis.h>
 
 #define RX_RING_SIZE 1024
@@ -189,8 +191,8 @@ int
 main(int argc, char *argv[])
 {
 	struct rte_mempool *mbuf_pool;
-	// unsigned nb_ports;
 	uint16_t portid = 0;
+	unsigned lcore_id;
 
 	/* Initialize the Environment Abstraction Layer (EAL). */
 	int ret = rte_eal_init(argc, argv);
@@ -200,11 +202,6 @@ main(int argc, char *argv[])
 	argc -= ret;
 	argv += ret;
 
-	/* Check that there is an even number of ports to send/receive on. */
-	// nb_ports = rte_eth_dev_count_avail();
-	// if (nb_ports < 2 || (nb_ports & 1))
-	// 	rte_exit(EXIT_FAILURE, "Error: number of ports must be even\n");
-
 	/* Creates a new mempool in memory to hold the mbufs. */
 	mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS * 1,
 		MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
@@ -213,16 +210,18 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
 
 	/* Initialize all ports. */
-	// RTE_ETH_FOREACH_DEV(portid)
 	if (port_init(portid, mbuf_pool) != 0)
 		rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
 				portid);
 
-	if (rte_lcore_count() > 1)
-		printf("\nWARNING: Too many lcores enabled. Only 1 used.\n");
+	/* call lcore_main() on every worker lcore */
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
+		rte_eal_remote_launch(lcore_main, NULL, lcore_id);
+	}
 
-	/* Call lcore_main on the main core only. */
+	/* call it on main lcore too */
 	lcore_main();
 
+	rte_eal_mp_wait_lcore();
 	return 0;
 }
