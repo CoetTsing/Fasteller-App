@@ -13,12 +13,12 @@
 
 #include <hiredis/hiredis.h>
 
-#define RX_RING_SIZE 1024
+#define RX_RING_SIZE 16384
 #define TX_RING_SIZE 1024
 
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 250
-#define BURST_SIZE 32
+#define NUM_MBUFS 262143
+#define MBUF_CACHE_SIZE 500
+#define BURST_SIZE 32768
 
 // 考虑开启RSS模式
 static const struct rte_eth_conf port_conf_default = {
