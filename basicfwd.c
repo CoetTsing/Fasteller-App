@@ -20,11 +20,14 @@
 #define MBUF_CACHE_SIZE 250
 #define BURST_SIZE 32
 
+// 考虑开启RSS模式
 static const struct rte_eth_conf port_conf_default = {
 	.rxmode = {
 		.max_rx_pkt_len = RTE_ETHER_MAX_LEN,
 	},
 };
+
+uint16_t lcore_to_queue[128];
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 
@@ -36,11 +39,12 @@ static inline int
 port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 {
 	struct rte_eth_conf port_conf = port_conf_default;
-	const uint16_t rx_rings = 1, tx_rings = 1;
+	const uint16_t rx_rings = rte_lcore_count(), tx_rings = 1;
 	uint16_t nb_rxd = RX_RING_SIZE;
 	uint16_t nb_txd = TX_RING_SIZE;
 	int retval;
-	uint16_t q;
+	unsigned lcore_id;
+	uint16_t q = 0;
 	struct rte_eth_dev_info dev_info;
 	struct rte_eth_txconf txconf;
 
@@ -67,13 +71,22 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
 	if (retval != 0)
 		return retval;
 
-	/* Allocate and set up 1 RX queue per Ethernet port. */
-	for (q = 0; q < rx_rings; q++) {
+	/* Allocate and set up RX queue for every worker. */
+	RTE_LCORE_FOREACH_WORKER(lcore_id) {
 		retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
 				rte_eth_dev_socket_id(port), NULL, mbuf_pool);
 		if (retval < 0)
 			return retval;
+		lcore_to_queue[lcore_id] = q;
+		q++;
 	}
+
+	/* Allocate and set up RX queue for main lcore. */
+	retval = rte_eth_rx_queue_setup(port, q, nb_rxd,
+			rte_eth_dev_socket_id(port), NULL, mbuf_pool);
+	if (retval < 0)
+		return retval;
+	lcore_to_queue[rte_lcore_id()] = q;
 
 	txconf = dev_info.default_txconf;
 	txconf.offloads = port_conf.txmode.offloads;
@@ -115,16 +128,16 @@ port_init(uint16_t port, struct rte_mempool *mbuf_pool)
  * The lcore main. This is the main thread that does the work, reading from
  * an input port and writing to an output port.
  */
-static __rte_noreturn void
-lcore_main(void)
+static int
+lcore_main(__rte_unused void *arg)
 {
 	uint16_t port = 0;
+	unsigned lcore_id = rte_lcore_id();
 
 	/*
 	 * Check that the port is on the same NUMA node as the polling thread
 	 * for best performance.
 	 */
-	// RTE_ETH_FOREACH_DEV(port)
 	if (rte_eth_dev_socket_id(port) > 0 &&
 			rte_eth_dev_socket_id(port) !=
 					(int)rte_socket_id())
@@ -134,53 +147,37 @@ lcore_main(void)
 
 	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
 			rte_lcore_id());
+
 	redisContext *c = redisConnect("127.0.0.1", 6379);
 	redisReply *reply;
 	/* Run until the application is quit or killed. */
 	for (;;) {
-		/*
-		 * Receive packets on a port and forward them on the paired
-		 * port. The mapping is 0 -> 1, 1 -> 0, 2 -> 3, 3 -> 2, etc.
-		 */
-		// RTE_ETH_FOREACH_DEV(port) {
-
-		/* Get burst of RX packets, from first port of pair. */
+		/* Get burst of RX packets. */
 		struct rte_mbuf *bufs[BURST_SIZE];
-		const uint16_t nb_rx = rte_eth_rx_burst(port, 0,
+		const uint16_t nb_rx = rte_eth_rx_burst(port, lcore_to_queue[lcore_id],
 				bufs, BURST_SIZE);
 
 		if (unlikely(nb_rx == 0))
 			continue;
 
-		// myprintf(nb_rx);
 		for (int i = 0; i < nb_rx; i++) {
-            char *pktbuf = rte_pktmbuf_mtod(bufs[i], char *);
+			char *pktbuf = rte_pktmbuf_mtod(bufs[i], char *);
 			char key[16];
 			key[0] = pktbuf[0x17];
 			for (int j = 0x1a; j < 0x26; j++) {
 				key[j - 0x19] = pktbuf[j];
 			}
 			reply = redisCommand(c, "SET %b 1", key, 13);
+			printf("Core %u ", rte_lcore_id());
 			printf("SET (binary API): %s\n", reply->str);
  			freeReplyObject(reply);
-			// for (int j = 0 ; j < 13; j++) {
-			// 	putchar(key[j]);
-			// }
         }
-		/* Send burst of TX packets, to second port of pair. */
-		// const uint16_t nb_tx = rte_eth_tx_burst(port ^ 1, 0,
-		// 		bufs, nb_rx);
 
 		/* Free any unsent packets. */
-		// if (unlikely(nb_tx < nb_rx)) {
-		// 	uint16_t buf;
-		// 	for (buf = nb_tx; buf < nb_rx; buf++)
-		// 		rte_pktmbuf_free(bufs[buf]);
-		// }
 		for (uint16_t buf = 0; buf < nb_rx; buf++)
 			rte_pktmbuf_free(bufs[buf]);
-		// }
 	}
+	return 0;
 }
 
 /*
@@ -220,8 +217,8 @@ main(int argc, char *argv[])
 	}
 
 	/* call it on main lcore too */
-	lcore_main();
-
+	lcore_main(NULL);
+	// 需要考虑如何优雅地退出：主线程怎么退出？（kbhit()）怎么杀死其他的线程？（f**k优雅，主线程退出直接全退）
 	rte_eal_mp_wait_lcore();
 	return 0;
 }
