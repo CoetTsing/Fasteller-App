@@ -15,10 +15,10 @@
 
 #define RX_RING_SIZE 16384
 #define TX_RING_SIZE 1024
-
 #define NUM_MBUFS 262143
 #define MBUF_CACHE_SIZE 500
 #define BURST_SIZE 32768
+#define MAX_LCORE_NUM 16
 
 // 考虑开启RSS模式
 static const struct rte_eth_conf port_conf_default = {
@@ -37,6 +37,8 @@ static const struct rte_eth_conf port_conf_default = {
 };
 
 uint16_t lcore_to_queue[128];
+uint16_t nb_rx[MAX_LCORE_NUM];
+struct rte_mbuf *bufs[MAX_LCORE_NUM][BURST_SIZE];
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 
@@ -141,7 +143,7 @@ static int
 lcore_main(__rte_unused void *arg)
 {
 	uint16_t port = 0;
-	unsigned lcore_id = rte_lcore_id();
+	uint16_t queue_id = lcore_to_queue[rte_lcore_id()];
 
 	/*
 	 * Check that the port is on the same NUMA node as the polling thread
@@ -153,39 +155,13 @@ lcore_main(__rte_unused void *arg)
 		printf("WARNING, port %u is on remote NUMA node to "
 				"polling thread.\n\tPerformance will "
 				"not be optimal.\n", port);
+	
+	/* Get burst of RX packets. */
+	nb_rx[queue_id] = rte_eth_rx_burst(port, queue_id,
+			bufs[queue_id], BURST_SIZE);
 
-	printf("\nCore %u forwarding packets. [Ctrl+C to quit]\n",
-			rte_lcore_id());
+	printf("Core %u: %u\n", rte_lcore_id(), nb_rx[queue_id]);
 
-	redisContext *c = redisConnect("127.0.0.1", 6379);
-	redisReply *reply;
-	/* Run until the application is quit or killed. */
-	for (;;) {
-		/* Get burst of RX packets. */
-		struct rte_mbuf *bufs[BURST_SIZE];
-		const uint16_t nb_rx = rte_eth_rx_burst(port, lcore_to_queue[lcore_id],
-				bufs, BURST_SIZE);
-
-		if (unlikely(nb_rx == 0))
-			continue;
-
-		for (int i = 0; i < nb_rx; i++) {
-			char *pktbuf = rte_pktmbuf_mtod(bufs[i], char *);
-			char key[16];
-			key[0] = pktbuf[0x17];
-			for (int j = 0x1a; j < 0x26; j++) {
-				key[j - 0x19] = pktbuf[j];
-			}
-			reply = redisCommand(c, "SET %b 1", key, 13);
-			printf("Core %u ", rte_lcore_id());
-			printf("SET (binary API): %s\n", reply->str);
- 			freeReplyObject(reply);
-        }
-
-		/* Free any unsent packets. */
-		for (uint16_t buf = 0; buf < nb_rx; buf++)
-			rte_pktmbuf_free(bufs[buf]);
-	}
 	return 0;
 }
 
@@ -220,14 +196,41 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
 				portid);
 
-	/* call lcore_main() on every worker lcore */
-	RTE_LCORE_FOREACH_WORKER(lcore_id) {
-		rte_eal_remote_launch(lcore_main, NULL, lcore_id);
+	redisContext *c = redisConnect("127.0.0.1", 6379);
+	redisReply *reply;
+
+	/* Run until the application is quit or killed. */
+	for (;;) {
+		/* call lcore_main() on every worker lcore */
+		RTE_LCORE_FOREACH_WORKER(lcore_id) {
+			rte_eal_remote_launch(lcore_main, NULL, lcore_id);
+		}
+
+		/* call it on main lcore too */
+		lcore_main(NULL);
+
+		rte_eal_mp_wait_lcore();
+
+		for (int i = 0; i < rte_lcore_count(); i++) {
+			for (int j = 0; j < nb_rx[i]; j++) {
+				char *pktbuf = rte_pktmbuf_mtod(bufs[i][j], char *);
+				char key[16];
+				key[0] = pktbuf[0x17];
+				for (int k = 0x1a; k < 0x26; k++) {
+					key[k - 0x19] = pktbuf[k];
+				}
+				reply = redisCommand(c, "SET %b 1", key, 13);
+				freeReplyObject(reply);
+			}
+		}
+
+		/* Free any unsent packets. */
+		for (int i = 0; i < rte_lcore_count(); i++) {
+			for (uint16_t buf = 0; buf < nb_rx[i]; buf++) {
+				rte_pktmbuf_free(bufs[i][buf]);
+			}
+		}
 	}
 
-	/* call it on main lcore too */
-	lcore_main(NULL);
-	// 需要考虑如何优雅地退出：主线程怎么退出？（kbhit()）怎么杀死其他的线程？（f**k优雅，主线程退出直接全退）
-	rte_eal_mp_wait_lcore();
 	return 0;
 }
