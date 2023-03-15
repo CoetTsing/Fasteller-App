@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <inttypes.h>
+#include <sys/time.h>
 
 #include <rte_eal.h>
 #include <rte_ethdev.h>
@@ -39,6 +40,8 @@ static const struct rte_eth_conf port_conf_default = {
 uint16_t lcore_to_queue[128];
 uint16_t nb_rx[MAX_LCORE_NUM];
 struct rte_mbuf *bufs[MAX_LCORE_NUM][BURST_SIZE];
+redisContext *c[MAX_LCORE_NUM];
+redisReply *reply[MAX_LCORE_NUM];
 
 /* basicfwd.c: Basic DPDK skeleton forwarding example. */
 
@@ -144,23 +147,37 @@ lcore_main(__rte_unused void *arg)
 {
 	uint16_t port = 0;
 	uint16_t queue_id = lcore_to_queue[rte_lcore_id()];
-
-	/*
-	 * Check that the port is on the same NUMA node as the polling thread
-	 * for best performance.
-	 */
-	if (rte_eth_dev_socket_id(port) > 0 &&
-			rte_eth_dev_socket_id(port) !=
-					(int)rte_socket_id())
-		printf("WARNING, port %u is on remote NUMA node to "
-				"polling thread.\n\tPerformance will "
-				"not be optimal.\n", port);
 	
 	/* Get burst of RX packets. */
 	nb_rx[queue_id] = rte_eth_rx_burst(port, queue_id,
 			bufs[queue_id], BURST_SIZE);
 
-	printf("Core %u: %u\n", rte_lcore_id(), nb_rx[queue_id]);
+	if (nb_rx[queue_id] > 0) {
+		printf("Core %u: %u\n", rte_lcore_id(), nb_rx[queue_id]);
+	}
+
+	return 0;
+}
+
+static int
+lcore_redis(__rte_unused void *arg)
+{
+	uint16_t queue_id = lcore_to_queue[rte_lcore_id()];
+
+	for (uint16_t buf = 0; buf < nb_rx[queue_id]; buf++) {
+		char *pktbuf = rte_pktmbuf_mtod(bufs[queue_id][buf], char *);
+		char key[16];
+		key[0] = pktbuf[0x17];
+		for (int k = 0x1a; k < 0x26; k++) {
+			key[k - 0x19] = pktbuf[k];
+		}
+		reply[queue_id] = redisCommand(c[queue_id], "SET %b 1", key, 13);
+		freeReplyObject(reply[queue_id]);
+	}
+
+	for (uint16_t buf = 0; buf < nb_rx[queue_id]; buf++) {
+		rte_pktmbuf_free(bufs[queue_id][buf]);
+	}
 
 	return 0;
 }
@@ -196,11 +213,15 @@ main(int argc, char *argv[])
 		rte_exit(EXIT_FAILURE, "Cannot init port %"PRIu16 "\n",
 				portid);
 
-	redisContext *c = redisConnect("127.0.0.1", 6379);
-	redisReply *reply;
+	for (int i = 0; i < rte_lcore_count(); i++) {
+		c[i] = redisConnect("127.0.0.1", 6379);
+	}
 
 	/* Run until the application is quit or killed. */
 	for (;;) {
+		struct timeval start,end;
+		gettimeofday(&start, NULL );
+
 		/* call lcore_main() on every worker lcore */
 		RTE_LCORE_FOREACH_WORKER(lcore_id) {
 			rte_eal_remote_launch(lcore_main, NULL, lcore_id);
@@ -211,24 +232,23 @@ main(int argc, char *argv[])
 
 		rte_eal_mp_wait_lcore();
 
-		for (int i = 0; i < rte_lcore_count(); i++) {
-			for (int j = 0; j < nb_rx[i]; j++) {
-				char *pktbuf = rte_pktmbuf_mtod(bufs[i][j], char *);
-				char key[16];
-				key[0] = pktbuf[0x17];
-				for (int k = 0x1a; k < 0x26; k++) {
-					key[k - 0x19] = pktbuf[k];
-				}
-				reply = redisCommand(c, "SET %b 1", key, 13);
-				freeReplyObject(reply);
-			}
+		RTE_LCORE_FOREACH_WORKER(lcore_id) {
+			rte_eal_remote_launch(lcore_redis, NULL, lcore_id);
 		}
 
-		/* Free any unsent packets. */
+		/* call it on main lcore too */
+		lcore_redis(NULL);
+
+		rte_eal_mp_wait_lcore();
+
+		int my_sum = 0;
 		for (int i = 0; i < rte_lcore_count(); i++) {
-			for (uint16_t buf = 0; buf < nb_rx[i]; buf++) {
-				rte_pktmbuf_free(bufs[i][buf]);
-			}
+			my_sum += nb_rx[i];
+		}
+		if (my_sum > 0) {
+			gettimeofday(&end, NULL );
+			long timeuse =1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec - start.tv_usec;
+			printf("test: %f(entrys/s)\n", my_sum / (timeuse / 1000000.0));
 		}
 	}
 
